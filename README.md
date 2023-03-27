@@ -3,7 +3,7 @@ ChatGPT re-write of glitcherbot.
 
 This code was written interactively with ChatGPT.
 
-To run it, create a file called "urls.txt", and add a URL per line for each site you wish to visit.
+To run it, create a file called "urls.txt", and add a URL per line for each URL you wish to visit.
 
 Then run
 
