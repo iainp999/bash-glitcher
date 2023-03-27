@@ -1,39 +1,67 @@
 #!/bin/bash
 
-input_file="input_urls.txt"
+input_file="urls.txt"
 db_file="url_data.db"
+log_file="curl_log.txt"
 
-# Check if sqlite3 is available
-command -v sqlite3 >/dev/null 2>&1
-sqlite3_available=$?
-
-# Create the SQLite database and table if they don't exist and sqlite3 is available
-if [ $sqlite3_available -eq 0 ]; then
-    sqlite3 "$db_file" <<EOF
-    CREATE TABLE IF NOT EXISTS url_info (
-        url TEXT,
-        status_code INTEGER,
-        response_size INTEGER
-    );
-EOF
+# Check if sqlite3 command is available
+if command -v sqlite3 &> /dev/null; then
+    sqlite3_installed=true
+else
+    sqlite3_installed=false
 fi
 
-# Read the input file line by line and process each URL
-while IFS= read -r url; do
-    if [[ -n "$url" ]]; then
-        # Send a curl request and store the output
-        curl_output=$(curl -s -L -o /dev/null -w "status_code:%{http_code},response_size:%{size_download}" "$url")
+# Function to create the table if it doesn't exist
+create_table() {
+    sqlite3 "$db_file" "CREATE TABLE IF NOT EXISTS url_info (id INTEGER PRIMARY KEY, url TEXT NOT NULL, status_code INTEGER NOT NULL, response_size INTEGER NOT NULL, timestamp INTEGER NOT NULL);"
+}
 
-        # Extract the status code and response size
-        status_code=$(echo "$curl_output" | grep -oP '(?<=status_code:)\d+')
-        response_size=$(echo "$curl_output" | grep -oP '(?<=response_size:)\d+(\.\d+)?')
-
-        # Insert the data into the SQLite database if sqlite3 is available, otherwise output to the terminal
-        if [ $sqlite3_available -eq 0 ]; then
-            sqlite3 "$db_file" "INSERT INTO url_info (url, status_code, response_size) VALUES ('$url', $status_code, $response_size);"
-        else
-            echo "URL: $url, Status code: $status_code, Response size: $response_size"
-        fi
+# Create the database file and table if sqlite3 is installed
+if $sqlite3_installed; then
+    # Create the parent directory of the database file if it doesn't exist
+    if ! mkdir -p "$(dirname "$db_file")"; then
+        echo "Error: Could not create parent directory for database file" >&2
+        exit 1
     fi
-done < "$input_file"
 
+    touch "$db_file"
+    create_table
+fi
+
+# Read URLs from input file
+while IFS= read -r url; do
+    if [[ -z "$url" ]]; then
+        continue
+    fi
+
+    # Strip the URL scheme (method) if present
+    stripped_url="${url#*://}"
+
+    # Get the status code and response size
+    response=$(curl --max-time 60 -sI -L -w "HTTPSTATUS:%{http_code};SIZE:%{size_download};FINALURL:%{url_effective}\n" -o /dev/null -v -L "$url" 2>"$log_file")
+    status_code=$(echo "$response" | grep -oP 'HTTPSTATUS:\K\d+')
+
+    # Follow redirects and retrieve response size after redirect
+    final_url="$url"
+    while [[ "$final_url" != "$(echo "$response" | grep -oP 'FINALURL:\K.*')" ]]; do
+        final_url="$(echo "$response" | grep -oP 'FINALURL:\K.*')"
+        response=$(curl --max-time 60 -sI -L -w "HTTPSTATUS:%{http_code};SIZE:%{size_download};FINALURL:%{url_effective}\n" -o /dev/null -v -L "$final_url" 2>"$log_file")
+    done
+
+    response_size=$(echo "$response" | grep -oP 'SIZE:\K\d+')
+    timestamp=$(date +%s)
+
+    # Output the data to terminal if sqlite3 is not available
+    if ! $sqlite3_installed; then
+        echo "URL: $stripped_url"
+        echo "Status code: $status_code"
+        echo "Response size: $response_size"
+        echo "Timestamp: $timestamp"
+        echo
+        continue
+    fi
+
+    # Insert data into the SQLite database
+    sqlite3 "$db_file" "INSERT INTO url_info (url, status_code, response_size, timestamp) VALUES ('$stripped_url', '$status_code', '$response_size', '$timestamp');"
+
+done < "$input_file"
